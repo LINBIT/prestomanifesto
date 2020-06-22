@@ -27,3 +27,22 @@ $ prestomanifesto registry.io
 docker manifest create --insecure --amend registry.io/rck:latest registry.io/s390x/rck:latest registry.io/amd64/rck:latest
 docker manifest push --insecure registry.io/rck:latest
 ```
+
+# Docker
+This requires two bind mounts:
+- the docker socket
+- a `docker.json` that contains the credentials for registry
+
+```
+docker run -it --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.docker/config.json:/etc/docker/config.json linbit/presetomanifesto registry.io
+```
+
+If the image is started with `--force` the output is actually executed. Be careful.
+
+```
+docker run -it --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ~/.docker/config.json:/etc/docker/config.json linbit/presetomanifesto --force registry.io
+```
