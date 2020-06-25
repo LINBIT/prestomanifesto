@@ -36,7 +36,7 @@ This requires two bind mounts:
 ```
 docker run -it --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ~/.docker/config.json:/etc/docker/config.json linbit/presetomanifesto registry.io
+  -v ~/.docker/config.json:/etc/docker/config.json linbit/prestomanifesto registry.io
 ```
 
 If the image is started with `--force` the output is actually executed. Be careful.
@@ -44,5 +44,5 @@ If the image is started with `--force` the output is actually executed. Be caref
 ```
 docker run -it --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ~/.docker/config.json:/etc/docker/config.json linbit/presetomanifesto --force registry.io
+  -v ~/.docker/config.json:/etc/docker/config.json linbit/prestomanifesto --force registry.io
 ```
