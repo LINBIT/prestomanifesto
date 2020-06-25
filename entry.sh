@@ -11,7 +11,7 @@ for o in "$@"; do
 		continue
 	fi
 
-	args="$args $o"
+	[ -z "$args" ] && args=$o || args="$args $o"
 done
 
 set -- "$args"
