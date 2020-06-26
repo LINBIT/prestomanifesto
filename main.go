@@ -30,6 +30,14 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+	allArchsSplit, archsSplit := strings.Split(*allArchs, ","), strings.Split(*archs, ",")
+	if len(allArchsSplit) == 0 {
+		log.Fatal("list of '-all' architectures not allowed to be empty")
+	}
+	if len(archsSplit) == 0 {
+		log.Fatal("list of '-a' architectures not allowed to be empty")
+	}
+
 	domain := flag.Arg(0)
 
 	ctx := context.Background()
@@ -38,17 +46,35 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	err = run(ctx, reg, allArchsSplit, archsSplit)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string) error {
 	repoTags, err := getAllRepoTags(ctx, reg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	updates, err := getUpdates(ctx, reg, repoTags, strings.Split(*allArchs, ","), strings.Split(*archs, ","))
+
+	updates, err := getUpdates(ctx, reg, repoTags, allArchs, archs)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	nrUpdates := len(updates)
+	log.Printf("number of updates: %d\n", nrUpdates)
+	if nrUpdates == 0 {
+		return nil
+	}
+
 	if err := pushUpdates(updates, reg.Domain); err != nil {
-		log.Fatal(err)
+		return err
 	}
+
+	return nil
 }
 
 type updateInfo struct {
