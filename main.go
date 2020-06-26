@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/genuinetools/reg/registry"
 	"github.com/genuinetools/reg/repoutils"
@@ -19,6 +21,8 @@ import (
 func main() {
 	archs := flag.String("a", "amd64,s390x", "',' separated list of architecture prefixes to process")
 	allArchs := flag.String("all", "amd64,s390x,ppc64le,arm64", "',' separated list of all architecture prefixes")
+	loopDuration := flag.Duration("d", 0, "if set to something not '0', execute in a loop every given time.Duration")
+	dryRun := flag.Bool("dry-run", false, "print 'docker manifest' commands on stdout, but don't execute them")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s [opts] registrydomain:\n", os.Args[0])
 		flag.PrintDefaults()
@@ -47,13 +51,20 @@ func main() {
 		log.Fatal(err)
 	}
 
-	err = run(ctx, reg, allArchsSplit, archsSplit)
-	if err != nil {
-		log.Fatal(err)
+	for {
+		err = run(ctx, reg, allArchsSplit, archsSplit, *dryRun)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if *loopDuration == 0 {
+			break
+		}
+		log.Printf("sleeping %s\n", *loopDuration)
+		time.Sleep(*loopDuration)
 	}
 }
 
-func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string) error {
+func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string, dryRun bool) error {
 	repoTags, err := getAllRepoTags(ctx, reg)
 	if err != nil {
 		return err
@@ -70,7 +81,7 @@ func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string) 
 		return nil
 	}
 
-	if err := pushUpdates(updates, reg.Domain); err != nil {
+	if err := pushUpdates(updates, reg.Domain, dryRun); err != nil {
 		return err
 	}
 
@@ -82,19 +93,44 @@ type updateInfo struct {
 	archs   []string
 }
 
-func pushUpdates(updateInfo []updateInfo, domain string) error {
-	createCmd := []string{"docker", "manifest", "create", "--insecure", "--amend"}
-	pushCmd := []string{"docker", "manifest", "push", "--insecure"}
+func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
+	createCmdArgs := []string{"manifest", "create", "--insecure", "--amend"}
+	pushCmdArgs := []string{"manifest", "push", "--insecure"}
+
 	for _, u := range updateInfo {
 		topLevel := fmt.Sprintf("%s/%s", domain, u.repoTag)
-		cCmd := append(createCmd, topLevel)
+		cCmdArgs := append(createCmdArgs, topLevel)
 		for _, a := range u.archs {
-			cCmd = append(cCmd, fmt.Sprintf("%s/%s/%s", domain, a, u.repoTag))
+			cCmdArgs = append(cCmdArgs, fmt.Sprintf("%s/%s/%s", domain, a, u.repoTag))
 		}
-		fmt.Println(strings.Join(cCmd, " "))
-		pCmd := append(pushCmd, topLevel)
-		fmt.Println(strings.Join(pCmd, " "))
+
+		if err := execPrint("docker", cCmdArgs, dryRun); err != nil {
+			return err
+		}
+
+		pCmdArgs := append(pushCmdArgs, topLevel)
+		if err := execPrint("docker", pCmdArgs, dryRun); err != nil {
+			return err
+		}
 	}
+
+	return nil
+}
+
+func execPrint(name string, args []string, dryRun bool) error {
+	fmt.Println(name, strings.Join(args, " "))
+
+	if dryRun {
+		return nil
+	}
+
+	log.Println("executing command")
+	cmd := exec.Command(name, args...)
+	stdoutStderr, err := cmd.CombinedOutput()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", stdoutStderr)
 
 	return nil
 }

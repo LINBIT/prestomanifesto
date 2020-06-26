@@ -14,11 +14,10 @@ This is an opinionated tool to generate multi-arch docker registries.
 `$domain/$image:$tag`) consists of all matching architecture images/tags (i.e., `$domain/$arch/$image:$tag`
 for all `$arch`). It does that for all repositories.
 
-If a top-level manifest needs update, the commands to update it are printed on `stdout`.
-The brave can therefore execute it like:
+If a top-level manifest needs update, the commands to update are executed or printed on `stdout`.
 
 ```
-prestomanifesto $domain 2>/dev/null | sh
+prestomanifesto -dry-run $domain
 ```
 
 # Example
@@ -36,13 +35,5 @@ This requires two bind mounts:
 ```
 docker run -it --rm \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ~/.docker/config.json:/etc/docker/config.json linbit/prestomanifesto registry.io
-```
-
-If the image is started with `--force` the output is actually executed. Be careful.
-
-```
-docker run -it --rm \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v ~/.docker/config.json:/etc/docker/config.json linbit/prestomanifesto --force registry.io
+  -v ~/.docker/config.json:/etc/docker/config.json linbit/prestomanifesto -dry-run registry.io
 ```
