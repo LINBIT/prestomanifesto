@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +99,9 @@ func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
 	createCmdArgs := []string{"manifest", "create", "--insecure", "--amend"}
 	pushCmdArgs := []string{"manifest", "push", "--insecure"}
 
+	if err := rmDockerManifests(dryRun); err != nil {
+		return err
+	}
 	for _, u := range updateInfo {
 		topLevel := fmt.Sprintf("%s/%s", domain, u.repoTag)
 		cCmdArgs := append(createCmdArgs, topLevel)
@@ -290,4 +295,23 @@ func processArch(prefix string, allArchs, validArch []string) (string, bool) {
 
 	// not an arch, so it is a toplevel repo
 	return "", true
+}
+
+// even with --amend I had very weird results
+// the .docker/manifests/ are basicall a scratch space anyways
+// and usually this runs in a container, so don't be too picky about rm -rf'ing it
+func rmDockerManifests(dryRun bool) error {
+	manifestDir := []string{"~", ".docker", "manifests"}
+	if dryRun {
+		fmt.Println("rm -rf ", path.Join(manifestDir...))
+		return nil
+	}
+
+	cUser, err := user.Current()
+	if err != nil {
+		return err
+	}
+
+	manifestDir[0] = cUser.HomeDir
+	return os.RemoveAll(path.Join(manifestDir...))
 }
