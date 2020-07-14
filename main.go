@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"os/user"
@@ -17,6 +16,7 @@ import (
 	"github.com/genuinetools/reg/registry"
 	"github.com/genuinetools/reg/repoutils"
 	digest "github.com/opencontainers/go-digest"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -25,6 +25,7 @@ func main() {
 	allArchs := flag.String("all", "amd64,s390x,ppc64le,arm64", "',' separated list of all architecture prefixes")
 	loopDuration := flag.Duration("d", 0, "if set to something not '0', execute in a loop every given time.Duration")
 	dryRun := flag.Bool("dry-run", false, "print 'docker manifest' commands on stdout, but don't execute them")
+	logLevel := flag.String("loglevel", "info", "log level as defined in logrus")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s [opts] registrydomain:\n", os.Args[0])
 		flag.PrintDefaults()
@@ -36,6 +37,13 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	lvl, err := log.ParseLevel(*logLevel)
+	if err != nil {
+		log.Fatalf("'%s' is not a valid logrus log level\n", *logLevel)
+	}
+	log.SetLevel(lvl)
+
 	allArchsSplit, archsSplit := strings.Split(*allArchs, ","), strings.Split(*archs, ",")
 	if len(allArchsSplit) == 0 {
 		log.Fatal("list of '-all' architectures not allowed to be empty")
@@ -61,7 +69,7 @@ func main() {
 		if *loopDuration == 0 {
 			break
 		}
-		log.Printf("sleeping %s\n", *loopDuration)
+		log.Debugf("sleeping %s\n", *loopDuration)
 		time.Sleep(*loopDuration)
 	}
 }
@@ -78,7 +86,8 @@ func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string, 
 	}
 
 	nrUpdates := len(updates)
-	log.Printf("number of updates: %d\n", nrUpdates)
+	t := time.Now().Format("2006-01-02 15:04:05")
+	log.Infof("%s: number of updates: %d\n", t, nrUpdates)
 	if nrUpdates == 0 {
 		return nil
 	}
@@ -129,7 +138,7 @@ func execPrint(name string, args []string, dryRun bool) error {
 		return nil
 	}
 
-	log.Println("executing command")
+	log.Debugln("executing command")
 	cmd := exec.Command(name, args...)
 	stdoutStderr, err := cmd.CombinedOutput()
 	if err != nil {
@@ -161,7 +170,7 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 		isArch := (arch != "")
 
 		for _, tag := range tags {
-			log.Printf("%s:%s\n", repo, tag)
+			log.Debugf("%s:%s\n", repo, tag)
 			tag := tag
 			g.Go(func() error {
 				if isArch { // registry.com/arm64/image:tag
@@ -169,14 +178,14 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 					if err != nil {
 						return err
 					}
-					log.Printf("\tget digest for %s\n", image)
+					log.Debugf("\tget digest for %s\n", image)
 					dig, err := reg.Digest(ctx, image)
 					if err != nil {
 						return err
 					}
 					repoNoarch := strings.Join(rSplit[1:], "/")
 					repoTag := repoNoarch + ":" + tag
-					log.Printf("\tdigests[%s][%s] += 1", repoTag, dig)
+					log.Debugf("\tdigests[%s][%s] += 1", repoTag, dig)
 					m.Lock()
 					ee, ok := digests[repoTag]
 					if !ok {
@@ -203,7 +212,7 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 					}
 					for _, m := range ml.Manifests {
 						dig := m.Digest
-						log.Printf("\tdigests[%s][%s] -= 1", repoTag, dig)
+						log.Debugf("\tdigests[%s][%s] -= 1", repoTag, dig)
 						digests[repoTag].digs[dig]--
 					}
 					m.Unlock()
