@@ -112,6 +112,12 @@ func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
 		return err
 	}
 	for _, u := range updateInfo {
+		if len(u.archs) == 0 {
+			// we should actually delete the toplevel manifest in this case
+			// but it is up to the admin to delete the manifest list if all $arch/ dirs are gone.
+			continue
+		}
+
 		topLevel := fmt.Sprintf("%s/%s", domain, u.repoTag)
 		cCmdArgs := append(createCmdArgs, topLevel)
 		for _, a := range u.archs {
