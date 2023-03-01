@@ -58,13 +58,13 @@ func main() {
 
 	reg, err := getRegistry(ctx, "", "", domain)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(fmt.Errorf("getRegistry, domain with domain '%s': %w", domain, err))
 	}
 
 	for {
 		err = run(ctx, reg, allArchsSplit, archsSplit, *dryRun)
 		if err != nil {
-			log.Fatal(err)
+			log.Fatal(fmt.Errorf("run(ctx, reg, %v, %v, %t): %w", allArchsSplit, archsSplit, *dryRun, err))
 		}
 		if *loopDuration == 0 {
 			break
@@ -77,12 +77,12 @@ func main() {
 func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string, dryRun bool) error {
 	repoTags, err := getAllRepoTags(ctx, reg)
 	if err != nil {
-		return err
+		return fmt.Errorf("getAllRepoTags(ctx, reg): %w", err)
 	}
 
 	updates, err := getUpdates(ctx, reg, repoTags, allArchs, archs)
 	if err != nil {
-		return err
+		return fmt.Errorf("getUpdates(ctx, reg, %v, %v): %w", repoTags, allArchs, archs, err)
 	}
 
 	nrUpdates := len(updates)
@@ -93,7 +93,7 @@ func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string, 
 	}
 
 	if err := pushUpdates(updates, reg.Domain, dryRun); err != nil {
-		return err
+		return fmt.Errorf("pushUpdates(%v, %s, %t): %w", updates, reg.Domain, dryRun, err)
 	}
 
 	return nil
@@ -109,7 +109,7 @@ func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
 	pushCmdArgs := []string{"manifest", "push", "--insecure"}
 
 	if err := rmDockerManifests(dryRun); err != nil {
-		return err
+		return fmt.Errorf("rmDockerManifests(%t): %w", dryRun, err)
 	}
 	for _, u := range updateInfo {
 		if len(u.archs) == 0 {
@@ -125,12 +125,12 @@ func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
 		}
 
 		if err := execPrint("docker", cCmdArgs, dryRun); err != nil {
-			return err
+			return fmt.Errorf("execPrint(docker, %v, %t): %w", cCmdArgs, dryRun, err)
 		}
 
 		pCmdArgs := append(pushCmdArgs, topLevel)
 		if err := execPrint("docker", pCmdArgs, dryRun); err != nil {
-			return err
+			return fmt.Errorf("execPrint(docker, %v, %t): %w", pCmdArgs, dryRun, err)
 		}
 	}
 
@@ -148,7 +148,7 @@ func execPrint(name string, args []string, dryRun bool) error {
 	cmd := exec.Command(name, args...)
 	stdoutStderr, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("exec.Command(%s, %v): %w", name, args, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s\n", stdoutStderr)
 
@@ -182,12 +182,12 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 				if isArch { // registry.com/arm64/image:tag
 					image, err := registry.ParseImage(fmt.Sprintf("%s/%s:%s", reg.Domain, repo, tag))
 					if err != nil {
-						return err
+						return fmt.Errorf("registry.ParseImage(%s/%s:%s): %w", reg.Domain, repo, tag, err)
 					}
 					log.Debugf("\tget digest for %s\n", image)
 					dig, err := reg.Digest(ctx, image)
 					if err != nil {
-						return err
+						return fmt.Errorf("reg.Digest(ctx, %s): %w", image, err)
 					}
 					repoNoarch := strings.Join(rSplit[1:], "/")
 					repoTag := repoNoarch + ":" + tag
@@ -206,7 +206,7 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 				} else { // "toplevel"; registry.com/image:tag
 					ml, err := reg.ManifestList(ctx, repo, tag)
 					if err != nil {
-						return err
+						return fmt.Errorf("reg.ManifestList(ctx, %s, %s): %w", repo, tag, err)
 					}
 					repoTag := repo + ":" + tag
 					m.Lock()
@@ -227,7 +227,7 @@ func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string
 			})
 		}
 		if err := g.Wait(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("g.Wait(): %w", err)
 		}
 	}
 
@@ -254,7 +254,7 @@ func getAllRepoTags(ctx context.Context, reg *registry.Registry) (map[string][]s
 		if _, ok := err.(*json.SyntaxError); ok {
 			return nil, fmt.Errorf("domain %s is not a valid registry", reg.Domain)
 		}
-		return nil, err
+		return nil, fmt.Errorf("reg.Catalog(...): %w", err)
 	}
 	var (
 		m        sync.Mutex
@@ -267,8 +267,7 @@ func getAllRepoTags(ctx context.Context, reg *registry.Registry) (map[string][]s
 		g.Go(func() error {
 			tags, err := reg.Tags(ctx, repo)
 			if err != nil {
-				fmt.Printf("get tags of [%s] error: %s", repo, err)
-				return err
+				return fmt.Errorf("reg.Tags(ctx, %s): %w", repo, err)
 			}
 			m.Lock()
 			repoTags[repo] = tags
@@ -284,12 +283,12 @@ func getAllRepoTags(ctx context.Context, reg *registry.Registry) (map[string][]s
 func getRegistry(ctx context.Context, username, password, domain string) (*registry.Registry, error) {
 	auth, err := repoutils.GetAuthConfig(username, password, domain)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("repoutils.GetAuthConfig(%s, ***, %s): %w", username, domain, err)
 	}
 
 	reg, err := registry.New(ctx, auth, registry.Opt{Domain: "https://" + domain})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("registry.New(ctx,...): %w", err)
 	}
 
 	return reg, nil
@@ -324,7 +323,7 @@ func rmDockerManifests(dryRun bool) error {
 
 	cUser, err := user.Current()
 	if err != nil {
-		return err
+		return fmt.Errorf("user.Current(): %w", err)
 	}
 
 	manifestDir[0] = cUser.HomeDir
