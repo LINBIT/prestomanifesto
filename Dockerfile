@@ -2,17 +2,12 @@ FROM golang:alpine AS builder
 WORKDIR /go/src/prestomanifesto
 COPY . .
 
+ENV CGO_ENABLED=0
 RUN go build && mv ./prestomanifesto /
 
-FROM alpine:latest
+FROM gcr.io/go-containerregistry/crane:debug
 MAINTAINER Roland Kammerer <roland.kammerer@linbit.com>
 
 COPY --from=builder /prestomanifesto /sbin
-RUN apk update \
-	&& apk add ca-certificates docker jq \
-	&& rm -rf /var/cache/apk/*
-
-ADD ./entry.sh /
-
+ENTRYPOINT ["/sbin/prestomanifesto"]
 CMD ["-h"]
-ENTRYPOINT ["/entry.sh"]

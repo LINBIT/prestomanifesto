@@ -2,29 +2,31 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
-	"os/exec"
-	"os/user"
-	"path"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/genuinetools/reg/registry"
-	"github.com/genuinetools/reg/repoutils"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/LINBIT/prestomanifesto/pkg/merge"
 )
 
 func main() {
-	archs := flag.String("a", "amd64,s390x", "',' separated list of architecture prefixes to process")
+	archs := flag.String("a", "amd64,s390x,ppc64le,arm64", "',' separated list of architecture prefixes to process")
 	allArchs := flag.String("all", "amd64,s390x,ppc64le,arm64", "',' separated list of all architecture prefixes")
 	loopDuration := flag.Duration("d", 0, "if set to something not '0', execute in a loop every given time.Duration")
-	dryRun := flag.Bool("dry-run", false, "print 'docker manifest' commands on stdout, but don't execute them")
+	dryRun := flag.Bool("dry-run", false, "only print what would happen")
 	logLevel := flag.String("loglevel", "info", "log level as defined in logrus")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s [opts] registrydomain:\n", os.Args[0])
@@ -52,13 +54,13 @@ func main() {
 		log.Fatal("list of '-a' architectures not allowed to be empty")
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
 	domain := flag.Arg(0)
-
-	ctx := context.Background()
-
-	reg, err := getRegistry(ctx, "", "", domain)
+	reg, err := name.NewRegistry(domain)
 	if err != nil {
-		log.Fatal(fmt.Errorf("getRegistry, domain with domain '%s': %w", domain, err))
+		log.Fatal(fmt.Errorf("name.NewRegistry(%s): %w", domain, err))
 	}
 
 	for {
@@ -74,226 +76,107 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, reg *registry.Registry, allArchs, archs []string, dryRun bool) error {
-	repoTags, err := getAllRepoTags(ctx, reg)
+func run(ctx context.Context, reg name.Registry, allArchs, archs []string, dryRun bool) error {
+	puller, err := remote.NewPuller(remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithTransport(DebugLogRoundTripper{}))
 	if err != nil {
-		return fmt.Errorf("getAllRepoTags(ctx, reg): %w", err)
+		return fmt.Errorf("remote.NewPuller(): %w", err)
 	}
 
-	updates, err := getUpdates(ctx, reg, repoTags, allArchs, archs)
+	pusher, err := remote.NewPusher(remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithTransport(DebugLogRoundTripper{}))
 	if err != nil {
-		return fmt.Errorf("getUpdates(ctx, reg, %v, %v): %w", repoTags, allArchs, archs, err)
+		return fmt.Errorf("remote.NewPusher(): %w", err)
 	}
 
-	nrUpdates := len(updates)
-	t := time.Now().Format("2006-01-02 15:04:05")
-	log.Infof("%s: number of updates: %d\n", t, nrUpdates)
-	if nrUpdates == 0 {
-		return nil
-	}
-
-	if err := pushUpdates(updates, reg.Domain, dryRun); err != nil {
-		return fmt.Errorf("pushUpdates(%v, %s, %t): %w", updates, reg.Domain, dryRun, err)
-	}
-
-	return nil
-}
-
-type updateInfo struct {
-	repoTag string
-	archs   []string
-}
-
-func pushUpdates(updateInfo []updateInfo, domain string, dryRun bool) error {
-	createCmdArgs := []string{"manifest", "create", "--insecure", "--amend"}
-	pushCmdArgs := []string{"manifest", "push", "--insecure"}
-
-	if err := rmDockerManifests(dryRun); err != nil {
-		return fmt.Errorf("rmDockerManifests(%t): %w", dryRun, err)
-	}
-	for _, u := range updateInfo {
-		if len(u.archs) == 0 {
-			// we should actually delete the toplevel manifest in this case
-			// but it is up to the admin to delete the manifest list if all $arch/ dirs are gone.
-			continue
-		}
-
-		topLevel := fmt.Sprintf("%s/%s", domain, u.repoTag)
-		cCmdArgs := append(createCmdArgs, topLevel)
-		for _, a := range u.archs {
-			cCmdArgs = append(cCmdArgs, fmt.Sprintf("%s/%s/%s", domain, a, u.repoTag))
-		}
-
-		if err := execPrint("docker", cCmdArgs, dryRun); err != nil {
-			return fmt.Errorf("execPrint(docker, %v, %t): %w", cCmdArgs, dryRun, err)
-		}
-
-		pCmdArgs := append(pushCmdArgs, topLevel)
-		if err := execPrint("docker", pCmdArgs, dryRun); err != nil {
-			return fmt.Errorf("execPrint(docker, %v, %t): %w", pCmdArgs, dryRun, err)
-		}
-	}
-
-	return nil
-}
-
-func execPrint(name string, args []string, dryRun bool) error {
-	fmt.Println(name, strings.Join(args, " "))
-
-	if dryRun {
-		return nil
-	}
-
-	log.Debugln("executing command")
-	cmd := exec.Command(name, args...)
-	stdoutStderr, err := cmd.CombinedOutput()
+	repoInfo, err := getRepoInfo(reg, allArchs, archs, remote.Reuse(puller), remote.Reuse(pusher))
 	if err != nil {
-		return fmt.Errorf("exec.Command(%s, %v): %w", name, args, err)
-	}
-	fmt.Fprintf(os.Stderr, "%s\n", stdoutStderr)
-
-	return nil
-}
-
-func getUpdates(ctx context.Context, reg *registry.Registry, repoTags map[string][]string, allArchs, validArch []string) ([]updateInfo, error) {
-	type containerInfo struct {
-		digs  map[digest.Digest]int
-		archs []string
+		return fmt.Errorf("getRepoInfo(ctx, %s): %w", reg, err)
 	}
 
-	var (
-		m       sync.Mutex
-		g       errgroup.Group
-		digests = make(map[string]containerInfo)
-	)
-
-	for repo, tags := range repoTags {
-		rSplit := strings.Split(repo, "/")
-		arch, ok := processArch(rSplit[0], allArchs, validArch)
-		if !ok {
-			continue
+	for dest, src := range repoInfo {
+		var args strings.Builder
+		for i := range src.img {
+			digest, _ := src.img[i].Digest()
+			fmt.Fprintf(&args, "--manifest %s@%s ", src.tag[i], digest)
 		}
-		isArch := (arch != "")
 
-		for _, tag := range tags {
-			log.Debugf("%s:%s\n", repo, tag)
-			tag := tag
-			g.Go(func() error {
-				if isArch { // registry.com/arm64/image:tag
-					image, err := registry.ParseImage(fmt.Sprintf("%s/%s:%s", reg.Domain, repo, tag))
-					if err != nil {
-						return fmt.Errorf("registry.ParseImage(%s/%s:%s): %w", reg.Domain, repo, tag, err)
-					}
-					log.Debugf("\tget digest for %s\n", image)
-					dig, err := reg.Digest(ctx, image)
-					if err != nil {
-						return fmt.Errorf("reg.Digest(ctx, %s): %w", image, err)
-					}
-					repoNoarch := strings.Join(rSplit[1:], "/")
-					repoTag := repoNoarch + ":" + tag
-					log.Debugf("\tdigests[%s][%s] += 1", repoTag, dig)
-					m.Lock()
-					ee, ok := digests[repoTag]
-					if !ok {
-						ee = containerInfo{
-							digs: make(map[digest.Digest]int),
-						}
-					}
-					ee.archs = append(ee.archs, arch)
-					ee.digs[dig]++
-					digests[repoTag] = ee
-					m.Unlock()
-				} else { // "toplevel"; registry.com/image:tag
-					ml, err := reg.ManifestList(ctx, repo, tag)
-					if err != nil {
-						return fmt.Errorf("reg.ManifestList(ctx, %s, %s): %w", repo, tag, err)
-					}
-					repoTag := repo + ":" + tag
-					m.Lock()
-					if digests[repoTag].digs == nil {
-						info := containerInfo{
-							digs: make(map[digest.Digest]int),
-						}
-						digests[repoTag] = info
-					}
-					for _, m := range ml.Manifests {
-						dig := m.Digest
-						log.Debugf("\tdigests[%s][%s] -= 1", repoTag, dig)
-						digests[repoTag].digs[dig]--
-					}
-					m.Unlock()
-				}
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
-			return nil, fmt.Errorf("g.Wait(): %w", err)
-		}
-	}
-
-	var updates []updateInfo
-	for rt, info := range digests {
-		var needsUpdate bool
-		for _, n := range info.digs {
-			if n != 0 {
-				needsUpdate = true
-				break
-			}
-		}
-		if needsUpdate {
-			updates = append(updates, updateInfo{repoTag: rt, archs: info.archs})
-		}
-	}
-
-	return updates, nil
-}
-
-func getAllRepoTags(ctx context.Context, reg *registry.Registry) (map[string][]string, error) {
-	repos, err := reg.Catalog(ctx, "")
-	if err != nil {
-		if _, ok := err.(*json.SyntaxError); ok {
-			return nil, fmt.Errorf("domain %s is not a valid registry", reg.Domain)
-		}
-		return nil, fmt.Errorf("reg.Catalog(...): %w", err)
-	}
-	var (
-		m        sync.Mutex
-		g        errgroup.Group
-		repoTags = map[string][]string{}
-	)
-
-	for _, repo := range repos {
-		repo := repo
-		g.Go(func() error {
-			tags, err := reg.Tags(ctx, repo)
+		fmt.Printf("crane index append --docker-empty-base %s--tag %s\n", args.String(), dest)
+		if !dryRun {
+			err = merge.Merge(src.img, dest, remote.Reuse(puller), remote.Reuse(pusher))
 			if err != nil {
-				return fmt.Errorf("reg.Tags(ctx, %s): %w", repo, err)
+				return fmt.Errorf("Merge(%s, %s): %w", src, dest, err)
 			}
-			m.Lock()
-			repoTags[repo] = tags
-			m.Unlock()
+		}
+	}
+
+	return nil
+}
+
+func getRepoInfo(registry name.Registry, allArchs, validArch []string, opts ...remote.Option) (map[name.Tag]SourceImages, error) {
+	repos, err := remote.Catalog(context.Background(), registry, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("remote.Catalog(ctx, \"%s\"): %w", registry, err)
+	}
+
+	log.Debugf("remote.Catalog(ctx, \"%s\") = %s", registry, strings.Join(repos, " "))
+
+	repoByBase := make(map[name.Repository][]name.Repository)
+	for _, repo := range repos {
+		parts := strings.SplitN(repo, "/", 2)
+		arch, ok := processArch(parts[0], allArchs, validArch)
+		if ok && arch != "" {
+			repoByBase[registry.Repo(parts[1])] = append(repoByBase[registry.Repo(parts[1])], registry.Repo(repo))
+		}
+	}
+
+	destImages := make(map[name.Tag]SourceImages)
+	lock := sync.Mutex{}
+	g := errgroup.Group{}
+	for dest, archRepos := range repoByBase {
+		dest := dest
+		archRepos := archRepos
+
+		g.Go(func() error {
+			log.Debugf("Processing %s = %v", dest, archRepos)
+
+			for _, archRepo := range archRepos {
+				arch := strings.SplitN(archRepo.RepositoryStr(), "/", 2)[0]
+
+				tags, err := remote.List(archRepo, opts...)
+				if err != nil {
+					return fmt.Errorf("remote.List(%s): %w", archRepo, err)
+				}
+
+				log.Debugf("remote.List(%s) = %s", archRepo, strings.Join(tags, " "))
+
+				for _, tag := range tags {
+					archRepoTag := archRepo.Tag(tag)
+					opts := slices.Clone(opts)
+					img, err := remote.Image(archRepoTag, append(opts, remote.WithPlatform(v1.Platform{OS: "linux", Architecture: arch}))...)
+					if err != nil {
+						return fmt.Errorf("remote.Image(%s): %w", archRepoTag, err)
+					}
+
+					lock.Lock()
+					d := destImages[dest.Tag(tag)]
+					d.Append(img, archRepoTag)
+					destImages[dest.Tag(tag)] = d
+					lock.Unlock()
+				}
+			}
 
 			return nil
 		})
 	}
 
-	return repoTags, g.Wait()
-}
-
-func getRegistry(ctx context.Context, username, password, domain string) (*registry.Registry, error) {
-	auth, err := repoutils.GetAuthConfig(username, password, domain)
+	err = g.Wait()
 	if err != nil {
-		return nil, fmt.Errorf("repoutils.GetAuthConfig(%s, ***, %s): %w", username, domain, err)
+		return nil, err
 	}
 
-	reg, err := registry.New(ctx, auth, registry.Opt{Domain: "https://" + domain})
-	if err != nil {
-		return nil, fmt.Errorf("registry.New(ctx,...): %w", err)
-	}
-
-	return reg, nil
+	return destImages, nil
 }
 
+// Returns the validated arch prefix, and true if it is valid arch to process.
 func processArch(prefix string, allArchs, validArch []string) (string, bool) {
 	for _, arch := range allArchs {
 		if prefix == arch { // it is an arch, but not sure if we want to process
@@ -311,21 +194,27 @@ func processArch(prefix string, allArchs, validArch []string) (string, bool) {
 	return "", true
 }
 
-// even with --amend I had very weird results
-// the .docker/manifests/ are basicall a scratch space anyways
-// and usually this runs in a container, so don't be too picky about rm -rf'ing it
-func rmDockerManifests(dryRun bool) error {
-	manifestDir := []string{"~", ".docker", "manifests"}
-	if dryRun {
-		fmt.Println("rm -rf ", path.Join(manifestDir...))
-		return nil
-	}
+// SourceImages wraps a list of images to make debug prints more readable
+type SourceImages struct {
+	img []v1.Image
+	tag []name.Tag
+}
 
-	cUser, err := user.Current()
+func (s *SourceImages) Append(img v1.Image, tag name.Tag) {
+	s.img = append(s.img, img)
+	s.tag = append(s.tag, tag)
+}
+
+// DebugLogRoundTripper is a http.RoundTripper that logs the method, URL and result of every request on debug level.
+type DebugLogRoundTripper struct{}
+
+func (d DebugLogRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
-		return fmt.Errorf("user.Current(): %w", err)
+		log.Debugf("%s: %s = %s", req.Method, req.URL, err)
+	} else {
+		log.Debugf("%s: %s = %d", req.Method, req.URL, resp.StatusCode)
 	}
 
-	manifestDir[0] = cUser.HomeDir
-	return os.RemoveAll(path.Join(manifestDir...))
+	return resp, err
 }
