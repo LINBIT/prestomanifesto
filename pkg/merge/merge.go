@@ -46,7 +46,6 @@ func Merge(src []v1.Image, dest name.Tag, opts ...remote.Option) error {
 	})
 
 	index := mutate.AppendManifests(empty.Index, mutations...)
-	index = mutate.IndexMediaType(index, types.DockerManifestList)
 
 	return remote.WriteIndex(dest, index, opts...)
 }
